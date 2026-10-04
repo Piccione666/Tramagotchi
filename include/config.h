@@ -44,6 +44,16 @@
 #define CONFIG_WEB_SERVER_ENABLED 1
 #define STATION_CONFIG_MAX_COUNT  5
 
+// ── Stop data updates ─────────────────────────────────────────────────────────
+// Folder URL that holds version.txt and littlefs.bin (made by
+// tools/update_wl_data.ps1 + `pio run -t buildfs`), e.g.
+// "https://<user>.github.io/<repo>/". Used by the config page's "Update stop
+// data" button and the automatic check. Only the stop lists are replaced; saved
+// stations and WiFi stay. Empty = no update source yet.
+#define DATA_UPDATE_URL          ""
+#define DATA_UPDATE_AUTO         1    // 1 = check by itself: 5 min after boot, then every interval
+#define DATA_UPDATE_CHECK_HOURS  24
+
 // ── Serial diagnostics ────────────────────────────────────────────────────────
 // 1 = log WiFi state and every fetch cycle (request, HTTP code, per-station
 // result) to USB serial at 115200 baud. Costs nothing when off.

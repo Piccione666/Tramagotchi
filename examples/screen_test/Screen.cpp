@@ -1,3 +1,6 @@
+// Standalone display bring-up sketch: prints "Screen Works" if the TFT wiring
+// and the TFT_eSPI build_flags in platformio.ini are right. Not part of the
+// firmware build; to run it, temporarily swap it in for src/main.cpp.
 #include <Arduino.h>
 #include <TFT_eSPI.h> // Include the graphics library
 
