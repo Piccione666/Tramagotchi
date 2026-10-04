@@ -1,0 +1,83 @@
+name: Publish stop data
+
+# Builds the LittleFS image (stop data + kawaii faces) and publishes it to GitHub Pages
+# as littlefs.bin + version.txt. The device (DATA_UPDATE_URL) downloads it when
+# version.txt differs from what it has installed.
+#   - monthly / manual run: refreshes the Wiener Linien data first
+#   - push that touches data/: publishes the committed data/ as it is (e.g. new kawaii faces)
+
+on:
+  schedule:
+    - cron: '0 5 1 * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'data/**'
+      - 'partitions_custom.csv'
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Refresh Wiener Linien data
+        if: github.event_name != 'push'
+        shell: powershell
+        run: ./tools/update_wl_data.ps1
+
+      # version = build date + short hash of everything in data/ (except version.txt itself)
+      - name: Stamp version
+        shell: powershell
+        run: |
+          $root = (Resolve-Path data).Path
+          $text = ''
+          Get-ChildItem data -Recurse -File | Where-Object { $_.Name -ne 'version.txt' } |
+            Sort-Object FullName | ForEach-Object {
+              $text += $_.FullName.Substring($root.Length) + (Get-FileHash $_.FullName -Algorithm SHA256).Hash
+            }
+          $sha = [Security.Cryptography.SHA256]::Create()
+          $bytes = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($text))
+          $hash = ([BitConverter]::ToString($bytes) -replace '-', '').Substring(0, 6).ToLower()
+          $version = (Get-Date -Format 'yyyy-MM-dd') + '-' + $hash
+          [IO.File]::WriteAllText("$root\version.txt", "$version`n", (New-Object Text.UTF8Encoding($false)))
+          Write-Output "Data version $version"
+
+      - name: Build LittleFS image
+        run: pio run -t buildfs
+
+      - name: Collect files
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory site | Out-Null
+          Copy-Item .pio/build/esp32-c3-devkitm-1/littlefs.bin site/
+          Copy-Item data/version.txt site/
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - id: deployment
+        uses: actions/deploy-pages@v4

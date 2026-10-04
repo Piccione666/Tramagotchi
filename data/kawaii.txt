@@ -1,0 +1,9 @@
+# Kawaii faces, one pair per line: "main brief" (split by whitespace).
+# The main face is shown long, the brief one short. Only a pair's own two faces
+# are ever combined. ASCII only, at most 5 characters per face, up to 16 pairs.
+# Lines starting with # are ignored. Changes reach the device with the next stop data update.
+OwO ^w^
+o_O -_-
+;_; -_-
+o_x -_x
+*u* 'u'
