@@ -1,4 +1,4 @@
-# After a build: everything a blank board needs goes to firmware/parts/<build>/
+# After a build: everything a blank board needs goes to .pio/parts/<build>/
 # (bootloader.bin, partitions.bin, boot_app0.bin, firmware.bin and parts.json
 # with each file's flash offset), for make_bundle.py to zip. The offsets come
 # from the platform itself (FLASH_EXTRA_IMAGES, ESP32_APP_OFFSET), so any
@@ -30,7 +30,7 @@ def firmware_version(root, env):
 def save(target, source, env):
     root = env.subst("$PROJECT_DIR")
     build = env.subst("$PIOENV")
-    folder = os.path.join(root, "firmware", "parts", build)
+    folder = os.path.join(root, ".pio", "parts", build)
     os.makedirs(folder, exist_ok=True)
     for old in os.listdir(folder):  # the last build's parts, but not the data image
         if old != FS_IMAGE:
@@ -61,10 +61,10 @@ def save(target, source, env):
 
 
 def save_fs(target, source, env):
-    folder = os.path.join(env.subst("$PROJECT_DIR"), "firmware", "parts", env.subst("$PIOENV"))
+    folder = os.path.join(env.subst("$PROJECT_DIR"), ".pio", "parts", env.subst("$PIOENV"))
     os.makedirs(folder, exist_ok=True)
     shutil.copyfile(str(target[0]), os.path.join(folder, FS_IMAGE))
-    print("Saved", os.path.join("firmware", "parts", env.subst("$PIOENV"), FS_IMAGE))
+    print("Saved", os.path.join(".pio", "parts", env.subst("$PIOENV"), FS_IMAGE))
 
 
 FS_IMAGE = "littlefs.bin"

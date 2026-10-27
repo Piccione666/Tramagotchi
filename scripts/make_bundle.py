@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Zips the builds in firmware/parts/ (save_parts.py) into one bundle for a
+"""Zips the builds in .pio/parts/ (save_parts.py) into one bundle for a
 flasher page: firmware/<Project>_bundle_v<version>_<date>.zip.
 
-  python scripts/make_bundle.py            every build in firmware/parts/
+  python scripts/make_bundle.py            every build in .pio/parts/
   python scripts/make_bundle.py -e A -e B  only these environments
 
 The zip holds manifest.json and a folder per build:
@@ -65,11 +65,11 @@ def partitions(folder):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("-e", "--env", action="append", help="environment to include (default: all in firmware/parts)")
+    ap.add_argument("-e", "--env", action="append", help="environment to include (default: all in .pio/parts)")
     ap.add_argument("--root", default=os.getcwd(), help="the project folder (default: here)")
     args = ap.parse_args()
 
-    parts = os.path.join(args.root, "firmware", "parts")
+    parts = os.path.join(args.root, ".pio", "parts")
     builds = []
     for name in sorted(os.listdir(parts)) if os.path.isdir(parts) else []:
         meta_path = os.path.join(parts, name, "parts.json")
@@ -77,7 +77,7 @@ def main():
             with open(meta_path, encoding="utf-8") as f:
                 builds.append((json.load(f), os.path.join(parts, name)))
     if not builds:
-        sys.exit("Nothing in firmware/parts/: build the environments first (save_parts.py is an extra_script).")
+        sys.exit("Nothing in .pio/parts/: build the environments first (save_parts.py is an extra_script).")
     if args.env and len(builds) != len(set(args.env)):
         sys.exit("Not built: " + ", ".join(sorted(set(args.env) - {m["build"] for m, _ in builds})))
     builds.sort(key=lambda b: b[0].get("order", 0))
