@@ -1139,9 +1139,10 @@ namespace {
 #endif
 
   // ── Stop data update (DATA_UPDATE_URL) ───────────────────────────────────────
-  // The source folder holds version.txt (one line, e.g. "2026-11-01") and
-  // littlefs.bin, the image `pio run -t buildfs` builds for this partition table.
-  // The image is only downloaded when its version differs from the installed one.
+  // The source folder holds version.txt (one line, "<date>-<hash>", e.g.
+  // "2026-11-01-fbec81") and littlefs.bin, the image `pio run -t buildfs` builds
+  // for this partition table. The image is only downloaded when its version
+  // differs from the installed one.
   String readDataVersion() {
     if (!gDataFsReady) return "";
     File file = LittleFS.open("/version.txt", "r");
@@ -1164,6 +1165,14 @@ namespace {
       }
     }
     display_set_kawaii_pairs(text.length() ? text.c_str() : nullptr);
+  }
+
+  // The date changes with every publish, the hash only when the stops do, so
+  // only the hash is compared. Older plain dates ("2026-11-01") compare whole.
+  String dataVersionId(const String& version) {
+    int dash = version.lastIndexOf('-');
+    String hash = dash >= 0 ? version.substring(dash + 1) : version;
+    return hash.length() == 6 ? hash : version;
   }
 
   bool fetchText(const String& url, String& out) {
@@ -1197,7 +1206,7 @@ namespace {
     if (!fetchText(baseUrl + "version.txt", remoteVersion) || !remoteVersion.length()) {
       return "Could not reach the update source.";
     }
-    if (remoteVersion == gDataVersion) {
+    if (dataVersionId(remoteVersion) == dataVersionId(gDataVersion)) {
       return "Stop data is up to date (" + gDataVersion + ").";
     }
 
