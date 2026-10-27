@@ -1,4 +1,4 @@
-#include <TFT_eSPI.h>
+#include "screen.h"  // TFT_eSPI on the C3, Arduino_GFX on the S3
 #include <cmath>
 #include "display.h"
 #include "config.h"
@@ -8,7 +8,7 @@
 #endif
 
 namespace {
-  TFT_eSPI tft = TFT_eSPI();
+  Screen tft;
   uint8_t gAnimationCycle = 255;
   bool gNoDataActive = false;
   int16_t gNoDataX = NO_DATA_START_X;
@@ -29,9 +29,8 @@ namespace {
   int16_t  gLastGhostY = -1;
 
   bool    gKawaiiActive      = false;
-  uint8_t gKawaiiFrameA      = 0;
-  uint8_t gKawaiiFrameB      = 1;
-  bool    gKawaiiShowingA    = true;
+  uint8_t gKawaiiPair        = 0;     // index into gKawaiiList
+  bool    gKawaiiShowingA    = true;  // true = main face, false = brief face
   uint32_t gKawaiiLastSwapMs = 0;
 
   // What the departure screen currently shows. Any other screen goes through
@@ -55,8 +54,27 @@ namespace {
   }
 
 #if !PURGE_EMOJI
-  void drawKawaiiFrameAt(uint8_t idx) {
-    const char* emoji = kKawaiiFrames[idx % kKawaiiFrameCount];
+  struct KawaiiFacePair {
+    char main[kKawaiiMaxFaceLen + 1];
+    char brief[kKawaiiMaxFaceLen + 1];
+  };
+  KawaiiFacePair gKawaiiList[kKawaiiMaxPairs];
+  uint8_t        gKawaiiListCount = 0;
+
+  // Copies the next whitespace-free word of a line into `out`. False if there is
+  // none, it is too long, or it holds anything but printable ASCII.
+  bool takeKawaiiWord(const char*& p, const char* end, char* out) {
+    while (p < end && (*p == ' ' || *p == '\t')) p++;
+    size_t len = 0;
+    while (p < end && *p != ' ' && *p != '\t') {
+      if (len >= kKawaiiMaxFaceLen || *p < 0x21 || *p > 0x7E) return false;
+      out[len++] = *p++;
+    }
+    out[len] = '\0';
+    return len > 0;
+  }
+
+  void drawKawaiiFrameAt(const char* emoji) {
     clearScreen();
     tft.setTextSize(KAWAII_TEXT_SIZE);
     tft.setTextColor(TFT_WHITE, TFT_BLACK);
@@ -406,7 +424,13 @@ void display_update_animation() {
 
 void display_init() {
   tft.init();
+#if defined(BOARD_TRAMAGOTCHI_C3)
   tft.setRotation(1);
+#else
+  // The AMOLED is round and square-dimensioned, so rotation buys nothing, and
+  // leaving it at 0 keeps the controller's column offset correct.
+  tft.setRotation(0);
+#endif
   clearScreen();
   randomSeed(micros());
 }
@@ -545,14 +569,44 @@ void display_no_data(const char* line, const char* towards, NoDataReason reason)
 }
 
 #if !PURGE_EMOJI
-void display_show_kawaii() {
-  gKawaiiFrameA = random(kKawaiiFrameCount);
-  do { gKawaiiFrameB = random(kKawaiiFrameCount); } while (gKawaiiFrameB == gKawaiiFrameA);
+// `text` is the content of /kawaii.txt: one "main brief" pair per line, '#' starts
+// a comment. Invalid lines are skipped; with no valid pair (or null) there are no
+// faces and kawaii mode stays off.
+void display_set_kawaii_pairs(const char* text) {
+  gKawaiiListCount = 0;
+  while (text && *text && gKawaiiListCount < kKawaiiMaxPairs) {
+    const char* end = strchr(text, '\n');
+    if (!end) end = text + strlen(text);
+    const char* p = text;
+    text = *end ? end + 1 : end;
+    while (end > p && end[-1] == '\r') end--;
+
+    KawaiiFacePair pair;
+    if (takeKawaiiWord(p, end, pair.main) && pair.main[0] != '#' &&
+        takeKawaiiWord(p, end, pair.brief)) {
+      gKawaiiList[gKawaiiListCount++] = pair;
+    }
+  }
+  gKawaiiPair = 0;
+}
+
+bool display_show_kawaii() {
+  if (!gKawaiiListCount) {
+    gKawaiiActive = false;
+    return false;
+  }
+  // A new pair each time, never the one just shown.
+  uint8_t previous = gKawaiiPair;
+  gKawaiiPair = random(gKawaiiListCount);
+  if (gKawaiiListCount > 1 && gKawaiiPair == previous) {
+    gKawaiiPair = (gKawaiiPair + 1 + random(gKawaiiListCount - 1)) % gKawaiiListCount;
+  }
   gKawaiiShowingA   = true;
   gKawaiiActive     = true;
   gNoDataActive     = false;
   gKawaiiLastSwapMs = millis();
-  drawKawaiiFrameAt(gKawaiiFrameA);
+  drawKawaiiFrameAt(gKawaiiList[gKawaiiPair].main);
+  return true;
 }
 
 void display_stop_kawaii() {
@@ -571,10 +625,12 @@ void display_update_kawaii_animation() {
   if (now - gKawaiiLastSwapMs < frameMs) return;
   gKawaiiLastSwapMs = now;
   gKawaiiShowingA   = !gKawaiiShowingA;
-  drawKawaiiFrameAt(gKawaiiShowingA ? gKawaiiFrameA : gKawaiiFrameB);
+  const KawaiiFacePair& pair = gKawaiiList[gKawaiiPair];
+  drawKawaiiFrameAt(gKawaiiShowingA ? pair.main : pair.brief);
 }
 #else
-void display_show_kawaii() {}
+void display_set_kawaii_pairs(const char*) {}
+bool display_show_kawaii() { return false; }
 void display_stop_kawaii() {}
 bool display_is_kawaii_active() { return false; }
 void display_update_kawaii_animation() {}

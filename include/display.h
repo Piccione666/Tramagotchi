@@ -28,7 +28,10 @@ void display_update_animation();
 void display_debug(const char* message);
 
 // Kawaii face animation
-void display_show_kawaii();
+// Sets the face pairs from the text of /kawaii.txt (null or no valid pair = none).
+void display_set_kawaii_pairs(const char* text);
+// False (and nothing drawn) when there are no face pairs.
+bool display_show_kawaii();
 void display_update_kawaii_animation();
 void display_stop_kawaii();
 bool display_is_kawaii_active();

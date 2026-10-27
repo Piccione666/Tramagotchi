@@ -1,0 +1,16 @@
+{
+ "options": [
+  {"id": "ssid", "label": "WiFi name", "type": "text", "max": 32},
+  {"id": "pass", "label": "WiFi password", "type": "password", "max": 63},
+  {"id": "stations", "label": "Stops", "type": "tree", "source": "stations_tree.json",
+   "levels": ["Line", "Stop", "Direction"], "max": 5, "join": "\n"}
+ ],
+ "nvs": {"entries": [
+  {"namespace": "wifi", "key": "version", "type": "u32", "value": 1, "when": "ssid"},
+  {"namespace": "wifi", "key": "ssid", "type": "string", "option": "ssid"},
+  {"namespace": "wifi", "key": "pass", "type": "string", "option": "pass", "when": "ssid"},
+  {"namespace": "stations", "key": "version", "type": "u32", "value": 2, "when": "stations"},
+  {"namespace": "stations", "key": "list", "type": "string", "option": "stations"}
+ ]},
+ "data": [{"path": "stations_tree.json", "from": "firmware/stations_tree.json"}]
+}

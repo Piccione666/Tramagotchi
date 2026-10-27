@@ -4,3 +4,17 @@
 .vscode/launch.json
 .vscode/ipch
 include/secrets.h
+
+# Factory flash images read off the S3 board, and the archived first S3 port;
+# device-specific, not source.
+backup/
+
+# Built firmware, copied there by scripts/save_firmware.py, save_parts.py and
+# make_bundle.py
+firmware/
+
+# Written into src/ by the S3's platform at every build
+src/idf_component.yml
+src/idf_component.yml.orig
+
+__pycache__/

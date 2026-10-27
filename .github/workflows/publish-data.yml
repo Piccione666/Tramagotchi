@@ -3,7 +3,8 @@ name: Publish stop data
 # Builds the LittleFS image (stop data + kawaii faces) and publishes it to GitHub Pages
 # as littlefs.bin + version.txt. The device (DATA_UPDATE_URL) downloads it when
 # version.txt differs from what it has installed.
-#   - monthly / manual run: refreshes the Wiener Linien data first
+#   - monthly / manual run: refreshes the Wiener Linien data first and commits it back
+#     (when it changed), so the repo always holds what Pages serves
 #   - push that touches data/: publishes the committed data/ as it is (e.g. new kawaii faces)
 
 on:
@@ -14,10 +15,10 @@ on:
     branches: [main]
     paths:
       - 'data/**'
-      - 'partitions_custom.csv'
+      - 'partitions_c3.csv'
 
 permissions:
-  contents: read
+  contents: write   # the monthly run commits the refreshed data
   pages: write
   id-token: write
 
@@ -64,14 +65,32 @@ jobs:
           Write-Output "Data version $version"
 
       - name: Build LittleFS image
-        run: pio run -t buildfs
+        run: pio run -e Tramagotchi_C3 -t buildfs   # the C3's (older) LittleFS format, which both boards read
 
       - name: Collect files
         shell: powershell
         run: |
           New-Item -ItemType Directory site | Out-Null
-          Copy-Item .pio/build/esp32-c3-devkitm-1/littlefs.bin site/
+          Copy-Item .pio/build/Tramagotchi_C3/littlefs.bin site/
           Copy-Item data/version.txt site/
+
+      # Without this, a later push to data/ would publish the older committed stops.
+      # Runs before the deploy: if the push fails, Pages keeps what the repo has.
+      # A push made with GITHUB_TOKEN doesn't start another workflow run.
+      - name: Commit refreshed data
+        if: github.event_name != 'push'
+        shell: bash
+        run: |
+          git config core.autocrlf true   # the index holds LF; keep CRLF rewrites out of the diff
+          git add -A data wl_ogv_resources
+          if git diff --cached --quiet -- . ':(exclude)data/version.txt'; then
+            echo "Stop data unchanged, nothing to commit"
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -q -m "Refresh Wiener Linien stop data ($(tr -d '\r\n' < data/version.txt))"
+          git push origin "HEAD:$GITHUB_REF"
 
       - uses: actions/configure-pages@v5
 

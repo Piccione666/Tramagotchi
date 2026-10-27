@@ -50,7 +50,7 @@
 // "https://<user>.github.io/<repo>/". Used by the config page's "Update stop
 // data" button and the automatic check. Only the stop lists are replaced; saved
 // stations and WiFi stay. Empty = no update source yet.
-#define DATA_UPDATE_URL          ""
+#define DATA_UPDATE_URL          "https://piccione666.github.io/Tramagotchi/"
 #define DATA_UPDATE_AUTO         1    // 1 = check by itself: 5 min after boot, then every interval
 #define DATA_UPDATE_CHECK_HOURS  24
 

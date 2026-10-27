@@ -8,6 +8,7 @@
 #include <ArduinoOTA.h>
 #include "config.h"
 #include "pinout.h"
+#include "input.h"
 #include "stations/stations.h"
 #if STATION_CONFIG_MODE == 1
 #include <Preferences.h>
@@ -40,6 +41,11 @@
 #ifndef WIFI_SSID_3
 #define WIFI_SSID_3 ""
 #endif
+// The firmware's file name (Tramagotchi_C3_v1.0_2026-10-27), set by
+// scripts/source_id.py; on /status, so the device says what it runs.
+#ifndef FIRMWARE_NAME
+#define FIRMWARE_NAME ""
+#endif
 #ifndef WIFI_PASS_3
 #define WIFI_PASS_3 ""
 #endif
@@ -56,7 +62,10 @@ namespace {
   constexpr uint32_t kRequestTimeoutMs = 5000;
   const char* kUserAgent = "Tramagotchi/1.0 (ESP32)";
   constexpr uint32_t kLoadingTickMs   = 20;
-  constexpr uint32_t kStorageVersion = 1;
+  constexpr uint32_t kStorageVersion = 1;          // wifi namespace
+  // Stored station list. 1 = rows were RBL,StationName,Line,Towards (migrated on load),
+  // 2 = RBL,Line,Towards,StationName.
+  constexpr uint32_t kStationsStorageVersion = 2;
   constexpr size_t kMaxStoredStationBytes = 768;
   constexpr size_t kMaxStoredWifiSsidBytes = 32;
   constexpr size_t kMaxStoredWifiPassBytes = 63;
@@ -101,6 +110,7 @@ namespace {
   // ── Shared state: written by fetch task, read by main loop ─────────────────
   SemaphoreHandle_t gMutex = nullptr;
   SemaphoreHandle_t gStationMutex = nullptr;
+  bool gAutoCycle = true;  // false = the stations only change with the button
 #if STATION_CONFIG_MODE == 1
   Preferences gPrefs;
 #if CONFIG_WEB_SERVER_ENABLED
@@ -190,7 +200,7 @@ namespace {
   // Both are seeded from the actual pin in setup(), so the idle level is
   // whatever the wiring says it is; starting them at a guessed level made the
   // first loop see a phantom release and cycle a station at boot.
-  bool     lastRawButton   = false;  // raw pin level, last time it changed
+  bool     lastRawButton   = false;  // input_pressed(), last time it changed
   bool     stableButton    = false;  // debounced "is pressed"
   uint32_t lastDebounceMs  = 0;
   uint32_t buttonPressMs   = 0;      // when the debounced button was pressed
@@ -237,11 +247,13 @@ namespace {
     for (size_t i = 0; i < gStationCount; i++) {
       text += gStations[i].rbl;
       text += ",";
-      text += gStations[i].stationName;
-      text += ",";
       text += gStations[i].line;
       text += ",";
       text += gStations[i].towards;
+      if (gStations[i].stationName.length()) {
+        text += ",";
+        text += gStations[i].stationName;
+      }
       if (i + 1 < gStationCount) text += "\n";
     }
     if (gStationMutex) xSemaphoreGive(gStationMutex);
@@ -314,7 +326,9 @@ namespace {
     return true;
   }
 
-  bool parseStationLine(String row, Station& station) {
+  // Row format: RBL,Line,Towards,StationName. The name comes last because nothing uses it,
+  // so it can simply be left off. `legacy` reads the old order RBL,StationName,Line,Towards.
+  bool parseStationLine(String row, Station& station, bool legacy = false) {
     row.trim();
     if (!row.length()) return false;
 
@@ -322,10 +336,20 @@ namespace {
     int p2 = p1 >= 0 ? row.indexOf(',', p1 + 1) : -1;
     int p3 = p2 >= 0 ? row.indexOf(',', p2 + 1) : -1;
 
+    String f1 = p1 >= 0 ? (p2 >= 0 ? row.substring(p1 + 1, p2) : row.substring(p1 + 1)) : "";
+    String f2 = p2 >= 0 ? (p3 >= 0 ? row.substring(p2 + 1, p3) : row.substring(p2 + 1)) : "";
+    String f3 = p3 >= 0 ? row.substring(p3 + 1) : "";
+
     station.rbl = p1 >= 0 ? row.substring(0, p1) : row;
-    station.stationName = p1 >= 0 && p2 >= 0 ? row.substring(p1 + 1, p2) : "";
-    station.line = p2 >= 0 && p3 >= 0 ? row.substring(p2 + 1, p3) : "";
-    station.towards = p3 >= 0 ? row.substring(p3 + 1) : "";
+    if (legacy) {
+      station.stationName = f1;
+      station.line        = f2;
+      station.towards     = f3;
+    } else {
+      station.line        = f1;
+      station.towards     = f2;
+      station.stationName = f3;
+    }
 
     station.rbl.trim();
     station.stationName.trim();
@@ -334,7 +358,7 @@ namespace {
     return stationIsValid(station);
   }
 
-  size_t parseStationList(const String& text, Station* stations, size_t maxCount) {
+  size_t parseStationList(const String& text, Station* stations, size_t maxCount, bool legacy = false) {
     size_t count = 0;
     size_t start = 0;
     while (start < text.length() && count < maxCount) {
@@ -342,7 +366,7 @@ namespace {
       String row = end >= 0 ? text.substring(start, end) : text.substring(start);
       row.replace("\r", "");
       Station station;
-      if (parseStationLine(row, station)) {
+      if (parseStationLine(row, station, legacy)) {
         stations[count++] = station;
       }
       if (end < 0) break;
@@ -372,6 +396,8 @@ namespace {
     gPrefs.end();
   }
 
+  void saveStations(const String& text);
+
   void loadStoredStations() {
     loadDefaultStations();
     if (!gPrefs.begin("stations", true)) return;
@@ -379,13 +405,14 @@ namespace {
     String stored = gPrefs.getString("list", "");
     gPrefs.end();
     if (!stored.length()) return;
-    if (version != kStorageVersion || stored.length() > kMaxStoredStationBytes) {
+    const bool legacy = version == 1;  // old column order, rewritten below
+    if ((version != kStationsStorageVersion && !legacy) || stored.length() > kMaxStoredStationBytes) {
       clearStoredStations();
       return;
     }
 
     Station parsed[kMaxStationCount];
-    size_t count = parseStationList(stored, parsed, kMaxStationCount);
+    size_t count = parseStationList(stored, parsed, kMaxStationCount, legacy);
     if (!count) {
       clearStoredStations();
       return;
@@ -395,11 +422,39 @@ namespace {
     gStationCount = count;
     for (size_t i = 0; i < count; i++) gStations[i] = parsed[i];
     if (gStationMutex) xSemaphoreGive(gStationMutex);
+    if (legacy) saveStations(stationListText());
   }
+
+  void loadAutoCycle() {
+    if (!gPrefs.begin("settings", true)) return;
+    gAutoCycle = gPrefs.getBool("autocycle", true);
+    gPrefs.end();
+  }
+
+  void saveAutoCycle() {
+    if (!gPrefs.begin("settings", false)) return;
+    gPrefs.putBool("autocycle", gAutoCycle);
+    gPrefs.end();
+  }
+
+#if defined(BOARD_TRAMAGOTCHI_S3)
+  // Which S3 source acts as the button: 0 = tap the screen, 1 = the PWR button.
+  void loadInputMode() {
+    if (!gPrefs.begin("settings", true)) return;
+    input_set_mode((InputMode)gPrefs.getUChar("input", InputTap));
+    gPrefs.end();
+  }
+
+  void saveInputMode() {
+    if (!gPrefs.begin("settings", false)) return;
+    gPrefs.putUChar("input", input_mode());
+    gPrefs.end();
+  }
+#endif
 
   void saveStations(const String& text) {
     if (!gPrefs.begin("stations", false)) return;
-    gPrefs.putUInt("version", kStorageVersion);
+    gPrefs.putUInt("version", kStationsStorageVersion);
     gPrefs.putString("list", text);
     gPrefs.end();
   }
@@ -726,6 +781,7 @@ namespace {
     html += F(".card>*:last-child,form>*:last-child{margin-bottom:0}");
     html += F("#preview label{display:flex;align-items:center;gap:10px;margin:0 0 10px}");
     html += F("#preview label:last-child{margin-bottom:0}");
+    html += F(".opt{display:flex;align-items:center;gap:10px;margin:0}");
     html += F("button{font:inherit;font-weight:400;color:var(--text);cursor:pointer;border:none;background:var(--bg);");
     html += F("border-radius:14px;padding:12px 22px;box-shadow:6px 6px 13px var(--sh),-3px -3px 7px #fff;");
     html += F("transition:box-shadow .12s,transform .12s}");
@@ -892,6 +948,20 @@ namespace {
     html += escapeHtml(stationListText());
     html += F("</textarea><div class='row end'><button type='submit'>Save</button></div></form></div>");
 
+    html += F("<div class='card'><div class='label'>Station switching</div>");
+    html += F("<form method='post' action='/cycle'><label class='opt'><input type='checkbox' name='auto' value='1'");
+    if (gAutoCycle) html += F(" checked");
+    html += F(" onchange='this.form.submit()'> Switch automatically</label></form></div>");
+
+#if defined(BOARD_TRAMAGOTCHI_S3)
+    html += F("<div class='card'><div class='label'>Button</div><form method='post' action='/input'>");
+    html += F("<label class='opt'><input type='radio' name='mode' value='0' onchange='this.form.submit()'");
+    if (input_mode() == InputTap) html += F(" checked");
+    html += F("> Tap the screen</label><br><label class='opt'><input type='radio' name='mode' value='1' onchange='this.form.submit()'");
+    if (input_mode() == InputButton) html += F(" checked");
+    html += F("> PWR button</label></form></div>");
+#endif
+
     html += F("<div class='card'><div class='label'>Stop data (");
     html += gDataVersion.length() ? escapeHtml(gDataVersion) : String(F("version unknown"));
     html += F(")</div><form method='post' action='/data-update' ");
@@ -930,7 +1000,7 @@ namespace {
     html += F("list.form.addEventListener('submit',()=>{list.value=list.value.split('\\n').map(r=>r.split(',').map(clean).join(',')).join('\\n')});");
     html += F("function addPreviewLines(){const o=sel.options[sel.selectedIndex];if(!o||!o.value)return;");
     html += F("if(!previewRows.length){document.getElementById('addHint').textContent='No preview rows available yet.';return;}");
-    html += F("let rows=[];document.querySelectorAll('.pr:checked').forEach(cb=>{const r=previewRows[+cb.value];if(/^\\d+$/.test(r.rbl))rows.push(clean(r.rbl)+','+clean(o.textContent)+','+clean(r.line)+','+clean(stripDir(r.towards)))});");
+    html += F("let rows=[];document.querySelectorAll('.pr:checked').forEach(cb=>{const r=previewRows[+cb.value];if(/^\\d+$/.test(r.rbl))rows.push(clean(r.rbl)+','+clean(r.line)+','+clean(stripDir(r.towards))+','+clean(o.textContent))});");
     html += F("if(rows.length){list.value=(list.value.trim()?list.value.trim()+'\\n':'')+rows.join('\\n');document.getElementById('addHint').textContent='Added '+rows.length+' row(s).'}}");
     html += F("const fw=document.getElementById('fw'),fwName=document.getElementById('fwName');");
     html += F("fw.addEventListener('change',()=>{fwName.textContent=fw.files.length?fw.files[0].name:''});");
@@ -949,7 +1019,9 @@ namespace {
     body.reserve(256);
     body += F("name=");
     body += DEVICE_LOCAL_HOSTNAME;
-    body += F(".local\nip=");
+    body += F(".local\nfirmware=");
+    body += FIRMWARE_NAME;
+    body += F("\nip=");
     body += WiFi.localIP().toString();
     body += F("\nrssi=");
     body += WiFi.RSSI();
@@ -1047,6 +1119,25 @@ namespace {
       : "Station list cleared."));
   }
 
+  void handleCycleSave() {
+    gAutoCycle = gServer.hasArg("auto");  // an unticked checkbox sends nothing
+    saveAutoCycle();
+    lastCycleMs = millis();
+    gServer.send(200, "text/html; charset=utf-8", configPageHtml(gAutoCycle
+      ? "Stations switch automatically."
+      : "Stations only switch with the button."));
+  }
+
+#if defined(BOARD_TRAMAGOTCHI_S3)
+  void handleInputSave() {
+    input_set_mode(gServer.arg("mode") == "1" ? InputButton : InputTap);
+    saveInputMode();
+    gServer.send(200, "text/html; charset=utf-8", configPageHtml(input_mode() == InputButton
+      ? "The PWR button is the button."
+      : "Tapping the screen is the button."));
+  }
+#endif
+
   // ── Stop data update (DATA_UPDATE_URL) ───────────────────────────────────────
   // The source folder holds version.txt (one line, e.g. "2026-11-01") and
   // littlefs.bin, the image `pio run -t buildfs` builds for this partition table.
@@ -1059,6 +1150,20 @@ namespace {
     file.close();
     version.trim();
     return version;
+  }
+
+  // Kawaii face pairs ship in the data image as /kawaii.txt. Without the file there
+  // are no faces and kawaii mode does nothing.
+  void loadKawaiiPairs() {
+    String text;
+    if (gDataFsReady) {
+      File file = LittleFS.open("/kawaii.txt", "r");
+      if (file) {
+        text = file.readString();
+        file.close();
+      }
+    }
+    display_set_kawaii_pairs(text.length() ? text.c_str() : nullptr);
   }
 
   bool fetchText(const String& url, String& out) {
@@ -1114,8 +1219,9 @@ namespace {
 
     mountDataFs(false);  // never format here: a failed download is fixed by retrying
     gDataVersion = readDataVersion();
-    if (kawaiiActive) display_show_kawaii();
-    else redrawCurrentScreen();
+    loadKawaiiPairs();
+    if (kawaiiActive && !display_show_kawaii()) kawaiiActive = false;  // faces are gone
+    if (!kawaiiActive) redrawCurrentScreen();
 
     if (result == HTTP_UPDATE_OK) return "Stop data updated (" + gDataVersion + ").";
     return "Stop data update failed: " + httpUpdate.getLastErrorString() + ". Try again.";
@@ -1139,6 +1245,10 @@ namespace {
     gServer.on("/lines", HTTP_GET, handleLineOptions);
     gServer.on("/stops", HTTP_GET, handleStopOptions);
     gServer.on("/save", HTTP_POST, handleConfigSave);
+    gServer.on("/cycle", HTTP_POST, handleCycleSave);
+#if defined(BOARD_TRAMAGOTCHI_S3)
+    gServer.on("/input", HTTP_POST, handleInputSave);
+#endif
     gServer.on("/data-update", HTTP_POST, handleDataUpdate);
     gServer.on("/upload", HTTP_POST, handleUploadDone, handleUploadFile);
     gServer.on("/upload-file", HTTP_POST, handleUploadDonePlain, handleUploadFile);
@@ -1528,12 +1638,17 @@ void setup() {
   gStationMutex = xSemaphoreCreateMutex();
 #if STATION_CONFIG_MODE == 1
   loadStoredStations();
+  loadAutoCycle();
+#if defined(BOARD_TRAMAGOTCHI_S3)
+  loadInputMode();
+#endif
 #else
   loadDefaultStations();
 #endif
 #if STATION_CONFIG_MODE == 1 && CONFIG_WEB_SERVER_ENABLED
   initDataFs();
   gDataVersion = readDataVersion();
+  loadKawaiiPairs();
 #endif
 
   bool wifiConnected = connectWifi();
@@ -1559,14 +1674,18 @@ void setup() {
   lastCycleMs = millis();
 
 #if !NO_BUTTON_ATTACHED
-  // Pull the pin to the *idle* level so the released state is defined: a button
-  // to 3V3 needs a pull-down, one to GND needs a pull-up.
-  pinMode(TOUCH_PIN, TOUCH_ACTIVE_LOW ? INPUT_PULLUP : INPUT_PULLDOWN);
-  lastRawButton  = (bool)digitalRead(TOUCH_PIN);
-  stableButton   = TOUCH_ACTIVE_LOW ? !lastRawButton : lastRawButton;
+  // input_pressed() already reports the *active* state, so the debounce below
+  // tracks that rather than a raw pin level.
+  input_init();
+  lastRawButton  = input_pressed();
+  stableButton   = lastRawButton;
   lastDebounceMs = millis();
-  LOGF("[boot] button pin %d idle=%s -> %s\n", TOUCH_PIN,
-       lastRawButton ? "HIGH" : "LOW", stableButton ? "PRESSED" : "released");
+#if defined(BOARD_TRAMAGOTCHI_S3)
+  LOGF("[boot] input: %s (touch %s, PWR %s, BOOT on)\n", input_mode() == InputButton ? "PWR button" : "tap",
+       input_touch_ready() ? "ready" : "NOT FOUND", input_pmu_ready() ? "ready" : "NOT FOUND");
+#else
+  LOGF("[boot] button pin %d -> %s\n", TOUCH_PIN, stableButton ? "PRESSED" : "released");
+#endif
 #endif
 }
 
@@ -1604,8 +1723,8 @@ void loop() {
   // ── Button cycling (short press cycles; long press toggles kawaii) ────────────
 #if !NO_BUTTON_ATTACHED
   {
-    bool raw = (bool)digitalRead(TOUCH_PIN);
-    bool active = TOUCH_ACTIVE_LOW ? !raw : raw;
+    bool active = input_pressed();
+    bool raw = active;
     if (raw != lastRawButton) {
       lastRawButton  = raw;
       lastDebounceMs = now;
@@ -1632,10 +1751,9 @@ void loop() {
       if (stableButton && !longPressHandled && now - buttonPressMs >= kKawaiiToggleLongMs) {
         longPressHandled = true;
         kawaiiActive = !kawaiiActive;
+        if (kawaiiActive && !display_show_kawaii()) kawaiiActive = false;  // no faces loaded
         LOGF("[button] long press -> kawaii %s\n", kawaiiActive ? "ON" : "OFF");
-        if (kawaiiActive) {
-          display_show_kawaii();
-        } else {
+        if (!kawaiiActive) {
           display_stop_kawaii();
           redrawCurrentScreen();
         }
@@ -1646,7 +1764,7 @@ void loop() {
 #endif  // !NO_BUTTON_ATTACHED
 
   // ── Auto-cycle station (advances index + triggers fetch, no blocking) ────────
-  if (!kawaiiActive && activeStationCount > 1) {
+  if (gAutoCycle && !kawaiiActive && activeStationCount > 1) {
     if (now - lastCycleMs >= STATION_CYCLE_INTERVAL_MS) {
       lastCycleMs  = now;
       stationIndex = (stationIndex + 1) % activeStationCount;
@@ -1657,7 +1775,7 @@ void loop() {
   }
 
   // ── Auto-cycle if no-data shown for the interval ────────────────────────────
-  if (!kawaiiActive && noDataVisible && activeStationCount > 1) {
+  if (gAutoCycle && !kawaiiActive && noDataVisible && activeStationCount > 1) {
     if (now - noDataStartMs >= STATION_CYCLE_INTERVAL_MS) {
       stationIndex = (stationIndex + 1) % activeStationCount;
       lastCycleMs  = now;
@@ -1755,9 +1873,8 @@ void loop() {
     static uint32_t sLastKawaiiMs = 0;
     if (!gKawaiiPopupActive && now - sLastKawaiiMs >= KAWAII_POPUP_INTERVAL_MS) {
       sLastKawaiiMs       = now;
-      gKawaiiPopupActive  = true;
       gKawaiiPopupStartMs = now;
-      display_show_kawaii();
+      gKawaiiPopupActive  = display_show_kawaii();
     }
     if (gKawaiiPopupActive) {
       display_update_kawaii_animation();
